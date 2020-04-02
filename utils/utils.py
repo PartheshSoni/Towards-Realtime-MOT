@@ -1,5 +1,6 @@
 import glob
 import random
+import time
 import os
 import os.path as osp
 
@@ -376,9 +377,9 @@ def generate_anchor(nGh, nGw, anchor_wh):
     xx, yy = xx.cuda(), yy.cuda()
 
     mesh = torch.stack([xx, yy], dim=0)                                              # Shape 2, nGh, nGw
-    mesh = mesh.unsqueeze(0).repeat(nA,1,1,1).float()                                # Shape nA x 2 x nGh x nGw
+    mesh = mesh.unsqueeze(0).repeat(nA,1,1,1)                               # Shape nA x 2 x nGh x nGw
     anchor_offset_mesh = anchor_wh.unsqueeze(-1).unsqueeze(-1).repeat(1, 1, nGh,nGw) # Shape nA x 2 x nGh x nGw
-    anchor_mesh = torch.cat([mesh, anchor_offset_mesh], dim=1)                       # Shape nA x 4 x nGh x nGw
+    anchor_mesh = torch.cat([mesh.half(), anchor_offset_mesh], dim=1)               # ChangeHere        # Shape nA x 4 x nGh x nGw
     return anchor_mesh
 
 def encode_delta(gt_box_list, fg_anchor_list):

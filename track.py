@@ -1,10 +1,10 @@
-import os
-import os.path as osp
-import cv2
+from __future__ import print_function
+import multiprocessing
+from multiprocessing import Process, Manager, Queue
 import logging
 import argparse
 import motmetrics as mm
-
+import copy
 import torch
 from tracker.multitracker import JDETracker
 from utils import visualization as vis
@@ -13,7 +13,14 @@ from utils.timer import Timer
 from utils.evaluation import Evaluator
 from utils.parse_config import parse_model_cfg
 import utils.datasets as datasets
+import csv
 from utils.utils import *
+import multiprocessing as mp
+import traceback
+
+mpl = multiprocessing.log_to_stderr()
+mpl.setLevel(logging.INFO)
+
 
 
 def write_results(filename, results, data_type):
@@ -38,83 +45,120 @@ def write_results(filename, results, data_type):
     logger.info('save results to {}'.format(filename))
 
 
-def eval_seq(opt, dataloader, data_type, result_filename, save_dir=None, show_image=True, frame_rate=30):
-    '''
-       Processes the video sequence given and provides the output of tracking result (write the results in video file)
+def post_proc(queue, state, tracker, results, save_dir, show_image, opt, result_filename, data_type, frame_id):
+    while True:
+        lisst = queue.get()
+        predslist, img0list, _ = lisst[0], lisst[1], lisst[2]  # Read from the queue and do nothing
+        if img0list == 0:
+            write_results(result_filename, results, data_type)
 
-       It uses JDE model for getting information about the online targets present.
+            break
 
-       Parameters
-       ----------
-       opt : Namespace
-             Contains information passed as commandline arguments.
+        for preds, img0 in zip(predslist, img0list):
+            state, frame_id = tracker.workOnDetections(opt, preds, results, img0, frame_id, save_dir, show_image, state)
 
-       dataloader : LoadVideo
-                    Instance of LoadVideo class used for fetching the image sequence and associated data.
 
-       data_type : String
-                   Type of dataset corresponding(similar) to the given video.
 
-       result_filename : String
-                         The name(path) of the file for storing results.
 
-       save_dir : String
-                  Path to the folder for storing the frames containing bounding box information (Result frames).
+def write_preds(preds, img0, frame_id, queue):
+    listt = [preds, img0, frame_id]
+    queue.put(listt)
 
-       show_image : bool
-                    Option for shhowing individial frames during run-time.
 
-       frame_rate : int
-                    Frame-rate of the given video.
-
-       Returns
-       -------
-       (Returns are not significant here)
-       frame_id : int
-                  Sequence number of the last sequence
-       '''
-
+def eval_seq(opt, dataloader, data_type, result_filename, save_dir=None, show_image=False, frame_rate=30):
     if save_dir:
         mkdir_if_missing(save_dir)
     tracker = JDETracker(opt, frame_rate=frame_rate)
     timer = Timer()
     results = []
-    frame_id = 0
+    frame_id = {'0': 0}
+    itr_id = 0
+    self_dict = copy.deepcopy(tracker.__dict__)
+    del self_dict['model']
+    del self_dict['opt']
+
+    pqueue = Queue()  # writer() writes to pqueue from _this_ process
+    reader_p = Process(target=post_proc, args=((pqueue, self_dict, tracker, results, save_dir, show_image, opt, result_filename, data_type, frame_id)))
+    reader_p.daemon = True
+    reader_p.start()
+
     for path, img, img0 in dataloader:
-        if frame_id % 20 == 0:
-            logger.info('Processing frame {} ({:.2f} fps)'.format(frame_id, 1./max(1e-5, timer.average_time)))
+        # cv2.imwrite("test.jpeg", img0[0])
+        if itr_id % 2 == 0:
+            logger.info('Processing frame {} ({:.2f} fps)'.format(itr_id * opt.batch_size,
+                                                                  float(opt.batch_size) / max(1e-5,
+                                                                                              timer.average_time)))
 
-        # run tracking
         timer.tic()
-        blob = torch.from_numpy(img).cuda().unsqueeze(0)
-        online_targets = tracker.update(blob, img0)
-        online_tlwhs = []
-        online_ids = []
-        for t in online_targets:
-            tlwh = t.tlwh
-            tid = t.track_id
-            vertical = tlwh[2] / tlwh[3] > 1.6
-            if tlwh[2] * tlwh[3] > opt.min_box_area and not vertical:
-                online_tlwhs.append(tlwh)
-                online_ids.append(tid)
+        img = np.array(img)
+        blob = torch.from_numpy(img).cuda()  # .unsqueeze(0)        # ChangeHere
+        preds = tracker.getDetections(blob)
+        # preds = torch.tensor(np.random.randn(10, 500, 518)).half()
+        write_preds(preds, img0, frame_id, pqueue)
+        # preds = preds.cpu()
+        # preds_arr = preds.numpy()
         timer.toc()
-        # save results
-        results.append((frame_id + 1, online_tlwhs, online_ids))
-        if show_image or save_dir is not None:
-            online_im = vis.plot_tracking(img0, online_tlwhs, online_ids, frame_id=frame_id,
-                                          fps=1. / timer.average_time)
-        if show_image:
-            cv2.imshow('online_im', online_im)
-        if save_dir is not None:
-            cv2.imwrite(os.path.join(save_dir, '{:05d}.jpg'.format(frame_id)), online_im)
-        frame_id += 1
+
+        itr_id += 1
+    write_preds(0, 0, 0, pqueue)
+
+    return frame_id['0'], timer.average_time, timer.calls
+
+
+def batch_size_effect_measure(opt, dataloader, data_type, result_filename, save_dir=None, show_image=False, frame_rate=30):
+    if save_dir:
+        mkdir_if_missing(save_dir)
+    tracker = JDETracker(opt, frame_rate=frame_rate)
+    timer = Timer()
+    results = []
+    frame_id = {'0': 0}
+    gpu_used = 0
+    itr_id = 0
+    self_dict = copy.deepcopy(tracker.__dict__)
+    del self_dict['model']
+    del self_dict['opt']
+
+    pqueue = Queue()  # writer() writes to pqueue from _this_ process
+    reader_p = Process(target=post_proc, args=(
+    (pqueue, self_dict, tracker, results, save_dir, show_image, opt, result_filename, data_type, frame_id)))
+    reader_p.daemon = True
+    reader_p.start()
+
+    for path, img, img0 in dataloader:
+        # cv2.imwrite("test.jpeg", img0[0])
+        if itr_id % 2 == 0:
+            logger.info('Processing frame {} ({:.2f} fps)'.format(itr_id * opt.batch_size,
+                                                                  float(opt.batch_size) / max(1e-5,
+                                                                                              timer.average_time)))
+
+        if itr_id == 0:
+            gpu_used = int(get_gpu_memory_map()[0]) - 129
+        if img == 0:
+            break
+        timer.tic()
+        img = np.array(img)
+        blob = torch.from_numpy(img).cuda()  # .unsqueeze(0)        # ChangeHere
+        preds = tracker.getDetections(blob)
+        # preds = torch.tensor(np.random.randn(10, 500, 518)).half()
+        write_preds(preds, img0, frame_id, pqueue)
+        # preds = preds.cpu()
+        # preds_arr = preds.numpy()
+        timer.toc()
+
+        itr_id += 1
+
+    fps = float(opt.batch_size) / max(1e-5, timer.average_time)
+    write_preds(0, 0, 0, pqueue)
+
+    # for proc in jobs:
+    #     proc.join()
     # save results
-    write_results(result_filename, results, data_type)
-    return frame_id, timer.average_time, timer.calls
+    return fps, gpu_used
 
 
-def main(opt, data_root='/data/MOT16/train', det_root=None, seqs=('MOT16-05',), exp_name='demo', 
+def main(opt, data_root='/data/MOT16/train', det_root=None, seqs=('MOT16-05',), exp_name='demo',
          save_images=False, save_videos=False, show_image=True):
+    """Run demo.py for accurate fps info"""
     logger.setLevel(logging.INFO)
     result_root = os.path.join(data_root, '..', 'results', exp_name)
     mkdir_if_missing(result_root)
@@ -129,13 +173,13 @@ def main(opt, data_root='/data/MOT16/train', det_root=None, seqs=('MOT16-05',), 
     n_frame = 0
     timer_avgs, timer_calls = [], []
     for seq in seqs:
-        output_dir = os.path.join(data_root, '..','outputs', exp_name, seq) if save_images or save_videos else None
+        output_dir = os.path.join(data_root, '..', 'outputs', exp_name, seq) if save_images or save_videos else None
 
         logger.info('start seq: {}'.format(seq))
         dataloader = datasets.LoadImages(osp.join(data_root, seq, 'img1'), opt.img_size)
         result_filename = os.path.join(result_root, '{}.txt'.format(seq))
-        meta_info = open(os.path.join(data_root, seq, 'seqinfo.ini')).read() 
-        frame_rate = int(meta_info[meta_info.find('frameRate')+10:meta_info.find('\nseqLength')])
+        meta_info = open(os.path.join(data_root, seq, 'seqinfo.ini')).read()
+        frame_rate = int(meta_info[meta_info.find('frameRate') + 10:meta_info.find('\nseqLength')])
         nf, ta, tc = eval_seq(opt, dataloader, data_type, result_filename,
                               save_dir=output_dir, show_image=show_image, frame_rate=frame_rate)
         n_frame += nf
@@ -169,7 +213,6 @@ def main(opt, data_root='/data/MOT16/train', det_root=None, seqs=('MOT16-05',), 
     Evaluator.save_summary(summary, os.path.join(result_root, 'summary_{}.xlsx'.format(exp_name)))
 
 
-
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(prog='track.py')
     parser.add_argument('--cfg', type=str, default='cfg/yolov3.cfg', help='cfg file path')
@@ -184,17 +227,17 @@ if __name__ == '__main__':
     parser.add_argument('--save-videos', action='store_true', help='save tracking results (video)')
     opt = parser.parse_args()
     print(opt, end='\n\n')
- 
+
     if not opt.test_mot16:
-        seqs_str = '''MOT17-02-SDP
-                      MOT17-04-SDP
-                      MOT17-05-SDP
-                      MOT17-09-SDP
-                      MOT17-10-SDP
-                      MOT17-11-SDP
-                      MOT17-13-SDP
-                    '''
-        data_root = '/home/wangzd/datasets/MOT/MOT17/images/train'
+        seqs_str = '''MOT16-02
+             MOT16-04
+             MOT16-05
+             MOT16-09
+             MOT16-10
+             MOT16-11
+             MOT16-13
+            '''
+        data_root = '/home/nisarg/guard/Custom_data/MOT16/train'
     else:
         seqs_str = '''MOT16-01
                      MOT16-03
@@ -204,6 +247,7 @@ if __name__ == '__main__':
                      MOT16-12
                      MOT16-14'''
         data_root = '/home/wangzd/datasets/MOT/MOT16/images/test'
+
     seqs = [seq.strip() for seq in seqs_str.split()]
 
     main(opt,
@@ -211,6 +255,6 @@ if __name__ == '__main__':
          seqs=seqs,
          exp_name=opt.weights.split('/')[-2],
          show_image=False,
-         save_images=opt.save_images, 
+         save_images=opt.save_images,
          save_videos=opt.save_videos)
 

@@ -76,17 +76,80 @@ class LoadImages:  # for inference
         return self.nF  # number of files
 
 
+
+class LoadImagesBatches(LoadImages):
+    def __init__(self, path, batch_size, img_size=(1088, 608)):
+        LoadImages.__init__(self, path, img_size=(1088, 608))
+        self._flag = 0
+        self._batch_size = batch_size
+
+
+    def __next__(self):
+        imgl = []
+        img0l = []
+
+        # ChangeHere
+        if self._flag == 1:
+            raise StopIteration
+
+        for i in range(self._batch_size):
+
+            self.count += 1
+            if self.count == self.nF:
+                self._flag = 1
+                break
+            img_path = self.files[self.count]
+
+            # Read image
+            img0 = cv2.imread(img_path)  # BGR
+            assert img0 is not None, 'Failed to load ' + img_path
+
+            # Padded resize
+            img, _, _, _ = letterbox(img0, height=self.height, width=self.width)
+
+            # Normalize RGB
+            img = img[:, :, ::-1].transpose(2, 0, 1)
+            img = np.ascontiguousarray(img, dtype=np.float32)
+            img /= 255.0
+
+            imgl.append(img)
+            img0l.append(img0)
+            # cv2.imwrite(img_path + '.letterbox.jpg', 255 * img.transpose((1, 2, 0))[:, :, ::-1])  # save letterbox image
+            return img_path, img, img0
+
+        return self.count, imgl, img0l
+
+    def __getitem__(self, idx):
+        idx = idx % self.nF
+        img_path = self.files[idx]
+
+        # Read image
+        img0 = cv2.imread(img_path)  # BGR
+        assert img0 is not None, 'Failed to load ' + img_path
+
+        # Padded resize
+        img, _, _, _ = letterbox(img0, height=self.height, width=self.width)
+
+        # Normalize RGB
+        img = img[:, :, ::-1].transpose(2, 0, 1)
+        img = np.ascontiguousarray(img, dtype=np.float32)
+        img /= 255.0
+
+        return img_path, img, img0
+
+    def __len__(self):
+        return self.nF  # number of files
+
+
+
+
 class LoadVideo:  # for inference
-    def __init__(self, path, img_size=(1088, 608)):
-        if not os.path.isfile(path):
-            raise FileExistsError
-        
-        self.cap = cv2.VideoCapture(path)        
+    def __init__(self, path,img_size=(1088, 608)):
+        self.cap = cv2.VideoCapture(path)
         self.frame_rate = int(round(self.cap.get(cv2.CAP_PROP_FPS)))
         self.vw = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         self.vh = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
         self.vn = int(self.cap.get(cv2.CAP_PROP_FRAME_COUNT))
-
         self.width = img_size[0]
         self.height = img_size[1]
         self.count = 0
@@ -97,7 +160,7 @@ class LoadVideo:  # for inference
     def get_size(self, vw, vh, dw, dh):
         wa, ha = float(dw) / vw, float(dh) / vh
         a = min(wa, ha)
-        return int(vw *a), int(vh*a)
+        return int(vw * a), int(vh * a)
 
     def __iter__(self):
         self.count = -1
@@ -122,9 +185,58 @@ class LoadVideo:  # for inference
 
         # cv2.imwrite(img_path + '.letterbox.jpg', 255 * img.transpose((1, 2, 0))[:, :, ::-1])  # save letterbox image
         return self.count, img, img0
+
+    def __len__(self):
+        return self.vn  # number of files
+
+
+class LoadVideoBatches(LoadVideo):  # for inference
+    def __init__(self, path, batch_size,img_size=(1088, 608)):
+        LoadVideo.__init__(self, path, img_size=(1088, 608))
+        self._flag = 0
+        self._batch_size = batch_size
+
+    def __next__(self):
+        imgl = []
+        img0l = []
+
+        # ChangeHere
+        if self._flag == 1:
+            raise StopIteration
+
+        for i in range(self._batch_size):
+            self.count += 1
+            if self.count == len(self):
+                self._flag = 1
+                break
+            # Read image
+            res, img0 = self.cap.read()  # BGR
+            assert img0 is not None, 'Failed to load frame {:d}'.format(self.count)
+            img0 = cv2.resize(img0, (self.w, self.h))
+
+            # Padded resize
+            img, _, _, _ = letterbox(img0, height=self.height, width=self.width)
+
+            # Normalize RGB
+            img = img[:, :, ::-1].transpose(2, 0, 1)
+            img = np.ascontiguousarray(img, dtype=np.float32)
+            img /= 255.0
+            imgl.append(img)
+            img0l.append(img0)
+
+        if self._flag == 1 and len(imgl) == 0:
+            imgl = 0
+            img0l = 0
+
+
+
+
+        return self.count, imgl, img0l
     
     def __len__(self):
         return self.vn  # number of files
+
+
 
 
 class LoadImagesAndLabels:  # for training
@@ -396,9 +508,6 @@ class JointDataset(LoadImagesAndLabels):  # for training
         
 
     def __getitem__(self, files_index):
-        """
-        Iterator function for train dataset
-        """
         for i, c in enumerate(self.cds):
             if files_index >= c: 
                 ds = list(self.label_files.keys())[i]

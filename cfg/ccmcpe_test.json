@@ -1,0 +1,15 @@
+{
+    "root":"/home/nisarg/guard/",
+    "test":
+    {
+        "data1":"Custom_data/img_seq/data1.train",
+        "data2":"Custom_data/img_seq/data2.train",
+        "data3":"Custom_data/img_seq/data3.val",
+        "data4":"Custom_data/img_seq/data4.val",
+        "data5":"Custom_data/img_seq/data5.val",
+        "data6":"Custom_data/img_seq/data6.val",
+        "data7":"Custom_data/img_seq/data7.val",
+        "data8":"Custom_data/img_seq/data8.val",
+        "data9":"Custom_data/img_seq/data9.val"
+    }
+}

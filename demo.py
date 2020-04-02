@@ -1,4 +1,4 @@
-"""Demo file for running the JDE tracker on custom video sequences for pedestrian tracking.
+"""Demo file for running the JDE tracker on custom video sequences for pedestrian tracking. 
 
 This file is the entry point to running the tracker on custom video sequences. It loads images from the provided video sequence, uses the JDE tracker for inference and outputs the video with bounding boxes indicating pedestrians. The bounding boxes also have associated ids (shown in different colours) to keep track of the movement of each individual. 
 
@@ -24,19 +24,29 @@ Todo:
     * More documentation
 """
 
+import os
+import os.path as osp
+import cv2
 import logging
 import argparse
+import motmetrics as mm
+
+from tracker.multitracker import JDETracker
+from utils import visualization as vis
 from utils.utils import *
+from utils.io import read_results
 from utils.log import logger
 from utils.timer import Timer
+from utils.evaluation import Evaluator
 from utils.parse_config import parse_model_cfg
 import utils.datasets as datasets
+import torch
 from track import eval_seq
 
 
 logger.setLevel(logging.INFO)
 
-def track(opt):
+def track(opt):    
     result_root = opt.output_root if opt.output_root!='' else '.'
     mkdir_if_missing(result_root)
 
@@ -49,16 +59,16 @@ def track(opt):
     n_frame = 0
 
     logger.info('Starting tracking...')
-    dataloader = datasets.LoadVideo(opt.input_video, opt.img_size)
+    dataloader = datasets.LoadVideoBatches(opt.input_video,  opt.batch_size, opt.img_size)
     result_filename = os.path.join(result_root, 'results.txt')
     frame_rate = dataloader.frame_rate 
 
     frame_dir = None if opt.output_format=='text' else osp.join(result_root, 'frame')
-    try:
-        eval_seq(opt, dataloader, 'mot', result_filename,
-                 save_dir=frame_dir, show_image=False, frame_rate=frame_rate)
-    except Exception as e:
-        logger.info(e)
+    # try:
+    eval_seq(opt, dataloader, 'mot', result_filename,
+             save_dir=frame_dir, show_image=False, frame_rate=frame_rate)
+    # except Exception as e:
+    #     logger.info(e)
 
     if opt.output_format == 'video':
         output_video_path = osp.join(result_root, 'result.mp4')
@@ -78,6 +88,7 @@ if __name__ == '__main__':
     parser.add_argument('--input-video', type=str, help='path to the input video')
     parser.add_argument('--output-format', type=str, default='video', choices=['video', 'text'], help='Expected output format. Video or text.')
     parser.add_argument('--output-root', type=str, default='results', help='expected output root path')
+    parser.add_argument('--batch-size', type=int, default='1', help='Batch size for feeding the model')
     opt = parser.parse_args()
     print(opt, end='\n\n')
 

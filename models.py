@@ -1,7 +1,9 @@
 import os
 from collections import defaultdict,OrderedDict
 
+import torch
 import torch.nn as nn
+
 
 from utils.parse_config import *
 from utils.utils import *
@@ -30,12 +32,16 @@ def create_modules(module_defs):
             filters = int(module_def['filters'])
             kernel_size = int(module_def['size'])
             pad = (kernel_size - 1) // 2 if int(module_def['pad']) else 0
+            # modules.add_module('half_prec_%d' %i, nn.half())
+            # modules.half()
             modules.add_module('conv_%d' % i, nn.Conv2d(in_channels=output_filters[-1],
                                                         out_channels=filters,
                                                         kernel_size=kernel_size,
                                                         stride=int(module_def['stride']),
                                                         padding=pad,
-                                                        bias=not bn))
+                                                        bias=not bn))                       #.half()
+            # modules.double()
+
             if bn:
                 after_bn = batch_norm(filters)
                 modules.add_module('batch_norm_%d' % i, after_bn)
@@ -45,28 +51,28 @@ def create_modules(module_defs):
                 nn.init.uniform_(after_bn.weight) 
                 nn.init.zeros_(after_bn.bias)
             if module_def['activation'] == 'leaky':
-                modules.add_module('leaky_%d' % i, nn.LeakyReLU(0.1))
+                modules.add_module('leaky_%d' % i, nn.LeakyReLU(0.1))           # .half()
 
         elif module_def['type'] == 'maxpool':
             kernel_size = int(module_def['size'])
             stride = int(module_def['stride'])
             if kernel_size == 2 and stride == 1:
-                modules.add_module('_debug_padding_%d' % i, nn.ZeroPad2d((0, 1, 0, 1)))
+                modules.add_module('_debug_padding_%d' % i, nn.ZeroPad2d((0, 1, 0, 1)))     #.half()
             maxpool = nn.MaxPool2d(kernel_size=kernel_size, stride=stride, padding=int((kernel_size - 1) // 2))
-            modules.add_module('maxpool_%d' % i, maxpool)
+            modules.add_module('maxpool_%d' % i, maxpool)       # .half()
 
         elif module_def['type'] == 'upsample':
             upsample = Upsample(scale_factor=int(module_def['stride']))
-            modules.add_module('upsample_%d' % i, upsample)
+            modules.add_module('upsample_%d' % i, upsample)     # .half()
 
         elif module_def['type'] == 'route':
             layers = [int(x) for x in module_def['layers'].split(',')]
             filters = sum([output_filters[i + 1 if i > 0 else i] for i in layers])
-            modules.add_module('route_%d' % i, EmptyLayer())
+            modules.add_module('route_%d' % i, EmptyLayer())        # .half()
 
         elif module_def['type'] == 'shortcut':
             filters = output_filters[int(module_def['from'])]
-            modules.add_module('shortcut_%d' % i, EmptyLayer())
+            modules.add_module('shortcut_%d' % i, EmptyLayer())     # .half()
 
         elif module_def['type'] == 'yolo':
             anchor_idxs = [int(x) for x in module_def['mask'].split(',')]
@@ -137,6 +143,7 @@ class YOLOLayer(nn.Module):
         
 
     def forward(self, p_cat,  img_size, targets=None, classifier=None, test_emb=False):
+        p_cat = p_cat
         p, p_emb = p_cat[:, :24, ...], p_cat[:, 24:, ...]
         nB, nGh, nGw = p.shape[0], p.shape[-2], p.shape[-1]
 
@@ -205,9 +212,9 @@ class YOLOLayer(nn.Module):
             #p_emb_up = F.normalize(shift_tensor_vertically(p_emb, -self.shift[self.layer]), dim=-1)
             #p_emb_down = F.normalize(shift_tensor_vertically(p_emb, self.shift[self.layer]), dim=-1)
             p_cls = torch.zeros(nB,self.nA,nGh,nGw,1).cuda()               # Temp
-            p = torch.cat([p_box, p_conf, p_cls, p_emb], dim=-1)
+            p = torch.cat([p_box.half(), p_conf.half(), p_cls.half(), p_emb.half()], dim=-1)        # ChangeHere
             #p = torch.cat([p_box, p_conf, p_cls, p_emb, p_emb_up, p_emb_down], dim=-1)
-            p[..., :4] = decode_delta_map(p[..., :4], self.anchor_vec.to(p))
+            p[..., :4] = decode_delta_map(p[..., :4], self.anchor_vec.to(p).half())     # ChangeHere
             p[..., :4] *= self.stride
 
             return p.view(nB, -1, p.shape[-1])
@@ -246,7 +253,9 @@ class Darknet(nn.Module):
 
         for i, (module_def, module) in enumerate(zip(self.module_defs, self.module_list)):
             mtype = module_def['type']
-            if mtype in ['convolutional', 'upsample', 'maxpool']:
+            if mtype in ['convolutional']:
+                x = module(x)
+            elif mtype in ['upsample', 'maxpool']:
                 x = module(x)
             elif mtype == 'route':
                 layer_i = [int(x) for x in module_def['layers'].split(',')]
@@ -258,6 +267,7 @@ class Darknet(nn.Module):
                 layer_i = int(module_def['from'])
                 x = layer_outputs[-1] + layer_outputs[layer_i]
             elif mtype == 'yolo':
+                # x = x.float()
                 if is_training:  # get loss
                     targets = [targets[i][:int(l)] for i,l in enumerate(targets_len)]
                     x, *losses = module[0](x, self.img_size, targets, self.classifier)
@@ -269,6 +279,7 @@ class Darknet(nn.Module):
                     x = module[0](x, self.img_size, targets, self.classifier, self.test_emb)
                 else:  # get detections
                     x = module[0](x, self.img_size)
+                # x = x.half()
                 output.append(x)
             layer_outputs.append(x)
 

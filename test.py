@@ -238,7 +238,7 @@ if __name__ == '__main__':
 
     with torch.no_grad():
         if opt.test_emb:
-            res = test_emb(
+      2trttorch      res = test_emb(
                 opt.cfg,
                 opt.data_cfg,
                 opt.weights,
